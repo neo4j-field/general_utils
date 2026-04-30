@@ -144,23 +144,75 @@ Each run writes:
 - `results/load_<timestamp>_b<batch>_p<parts>_<mode>.csv` — per-table rows / seconds / rows-per-sec, plus a TOTAL row.
 - `results/load_<timestamp>_*.log` — full run output for post-hoc analysis.
 
-## Smoke test results (1% scale, ~931K rows, n2-standard-8 -> 32GB Aura us-east1)
+## Benchmark results
 
-Captured 2026-04-30, end-to-end (generate + schema + load):
+### Full run (100% scale, 93M rows)
 
-| Phase | Rows | Wall time |
-|---|---:|---:|
-| Generate parquet | 931K | ~5s |
-| Schema setup (22 unique constraints) | n/a | ~3s |
-| Load nodes (22 types) | 340K | ~17s |
-| Load relationships (33 types) | 591K | ~54s |
-| **Total** | **931K** | **~76s** |
+Captured 2026-04-30 on n2-standard-8 (us-east1) → 32 GB Aura (us-east1),
+end-to-end pipeline (generate → schema → load). Configuration:
+`BATCH_SIZE=5000`, `PARTITIONS=8` (nodes), `REL_PARTITIONS=1` (rels),
+`HOT_REL_THRESHOLD=1000`, `NODE_MODE=create`. Full per-table CSV in
+[`results/full_run_b5000_p8_create.csv`](results/full_run_b5000_p8_create.csv).
 
-Effective rate: **13,090 rows/sec** (single-partition rel writes, mixed
-node parallelism). At full 87M-row scale this projects to ~110 minutes.
-Real-world throughput typically improves at scale because per-table
-overhead amortizes — the 1% smoke test pays the same per-table fixed
-cost on tables with as few as 1 row, which drags the average down.
+| Phase | Rows | Wall time | Rate |
+|---|---:|---:|---:|
+| Generate parquet | 93.13 M | ~50 s | **1,860 K rows/sec** |
+| Schema setup (22 unique constraints) | n/a | ~1 s | n/a |
+| Load nodes (22 types) | 34.08 M | ~407 s (6.8 min) | **84 K rows/sec** |
+| Load relationships (33 types) | 59.05 M | ~5,202 s (86.7 min) | **10.2 K rows/sec** |
+| **Total (loader only)** | **93.13 M** | **5,609 s (93.5 min)** | **16,604 rows/sec** |
+| **Total (end-to-end wall)** | **93.13 M** | **5,665 s (94.4 min)** | — |
+
+**Aura health during the run** (from the Aura console):
+- Page cache hit ratio: **99%+ sustained** for the entire 94 minutes
+- Heap: max 67%, average 35-45% (healthy sawtooth, GC working cleanly)
+- GC time: **0.008%** (essentially zero)
+- Deadlocks / retries: **zero**
+
+**Notable per-table observations:**
+- Largest single rel: `HAS_TRANSACTION` (5 M rows) → 7:26 at 11.2 K rows/sec.
+- Hot rels (tgt volume < 1000) ran at the **same or higher** throughput
+  as non-hot rels, despite the forced 1-partition write. Small dimension
+  targets stay fully cache-resident, so the MATCH side is essentially free.
+  `VIA_CHANNEL_SES` (target Channel = 20 nodes) was the single fastest
+  rel at 12.6 K rows/sec.
+- Slowest rel: `FOR_CUSTOMER_LOAN` at 8.8 K rows/sec — the label
+  transition (Loan source for the first time) paid a one-time
+  cache-warm-up cost.
+- Node phase peak: `Phone` at **107 K rows/sec** (narrow schema, 6 cols).
+
+**Producer-vs-receiver attribution.** At 99% page cache hit ratio with
+0.008% GC, the receiver was clearly not the bottleneck. The 10.2 K rows/sec
+ceiling on the rel phase is producer-side: single-partition serialization
+of writes through Bolt, with each batch of 5000 rows being a sync
+round-trip that the receiver could absorb 2-3x faster if we sent more
+of them in parallel. We chose serial writes for deadlock safety, and
+that choice is the dominant cost.
+
+### Customer extrapolation (their 213 M-rel workload on 128 GB Aura)
+
+This is what the run lets us tell the customer:
+
+| | Test run | Customer (projected) |
+|---:|---:|---:|
+| Aura tier | 32 GB / 6 CPU | 128 GB / 24 CPU |
+| Total rows | 93 M | ~349 M (4x test) |
+| Page cache headroom | 99% hit on test | More cache, even less pressure |
+| Naïve linear projection | 94 min | **~6.3 hours** at our serial rate |
+| Realistic with their CPU count | n/a | **2-3 hours** if rel-partitions tuned |
+
+The 4x receiver capacity (24 CPU) doesn't translate to 4x throughput
+because of the single WAL ceiling, but tuning `rel-partitions` from 1
+to 4-6 on rels with low target overlap should give ~2-3x speedup. That
+should be the customer's next experiment after the four core fixes are
+in place.
+
+### Smoke test (1% scale, validation only)
+
+Earlier 1% smoke test (~931 K rows): 76 s wall, 13,090 rows/sec. Used
+to validate the pipeline before committing 94 minutes of Aura time.
+Smoke-test extrapolation underestimated the full-run rate by ~25%
+because per-table fixed overhead amortizes better at scale.
 
 ## Recommendations applicable to the customer's production load
 
