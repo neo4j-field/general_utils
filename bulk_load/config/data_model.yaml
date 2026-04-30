@@ -1,0 +1,556 @@
+# Synthetic data model for the Neo4j bulk load benchmark.
+#
+# Mirrors the customer's shape:
+#   - 22 node types totaling ~34M rows (1/4 of their 136M)
+#   - 33 relationship types totaling ~53M rows (1/4 of their 213M)
+#   - Customer node:rel ratio preserved (~1.56 rels per node)
+#   - All relationships are narrow: 2 FK columns + insert_dtm + at most 1 attr
+#   - Customer has up to 33 columns on a node; here Customer has 33
+#
+# Domain: synthetic financial services. No real PII.
+#
+# Column generators:
+#   int, bigint:    uniform in [low, high]
+#   float:          uniform in [low, high]
+#   bool:           50/50
+#   date:           uniform in [start, end] as days
+#   timestamp:      uniform in [start, end] as epoch micros
+#   category:       np.random.choice from values
+#   sequential_id:  i (1-indexed row number) — used for primary keys
+#   pk_ref:         random FK in [1, target_volume] — used for relationship endpoints
+#   string_template: "{prefix}_{i}" — fast vectorized
+
+global:
+  seed: 42
+  date_min: "2018-01-01"
+  date_max: "2026-04-01"
+  rows_per_row_group: 1000000  # parquet row group size; controls memory during gen and read
+  output_format: parquet
+  compression: snappy
+
+nodes:
+
+  - label: Customer
+    primary_key: customer_id
+    volume: 3000000
+    columns:
+      - { name: customer_id,     type: sequential_id }
+      - { name: first_name,      type: string_template, prefix: FN }
+      - { name: last_name,       type: string_template, prefix: LN }
+      - { name: middle_name,     type: string_template, prefix: MN }
+      - { name: dob,             type: date }
+      - { name: gender,          type: category, values: [M, F, X] }
+      - { name: marital_status,  type: category, values: [single, married, divorced, widowed] }
+      - { name: nationality,     type: category, values: [US, UK, IN, CA, AU, DE, FR, JP, BR, MX] }
+      - { name: kyc_status,      type: category, values: [verified, pending, rejected] }
+      - { name: kyc_score,       type: int, low: 0, high: 1000 }
+      - { name: pep_flag,        type: bool }
+      - { name: sanctions_flag,  type: bool }
+      - { name: tax_residency,   type: category, values: [US, UK, IN, CA, AU, DE, FR, JP, BR, MX] }
+      - { name: occupation,      type: category, values: [engineer, doctor, teacher, accountant, lawyer, manager, sales, ops, student, retired] }
+      - { name: income_band,     type: category, values: [0-25k, 25-50k, 50-100k, 100-250k, 250-500k, 500k+] }
+      - { name: net_worth,       type: float, low: 0.0, high: 5000000.0 }
+      - { name: employment,      type: category, values: [employed, self_employed, unemployed, retired, student] }
+      - { name: education,       type: category, values: [hs, college, grad, postgrad] }
+      - { name: language,        type: category, values: [en, es, fr, de, ja, pt, hi, zh] }
+      - { name: preferred_channel, type: category, values: [web, mobile, branch, phone, atm] }
+      - { name: opt_in_marketing, type: bool }
+      - { name: opt_in_sms,      type: bool }
+      - { name: opt_in_email,    type: bool }
+      - { name: created_at,      type: timestamp }
+      - { name: updated_at,      type: timestamp }
+      - { name: last_login,      type: timestamp }
+      - { name: source_system,   type: category, values: [crm, web, branch, mobile, partner] }
+      - { name: customer_segment, type: category, values: [retail, premium, private, business, institutional] }
+      - { name: lifetime_value,  type: float, low: 0.0, high: 500000.0 }
+      - { name: churn_score,     type: float, low: 0.0, high: 1.0 }
+      - { name: email_hash,      type: string_template, prefix: EH }
+      - { name: phone_hash,      type: string_template, prefix: PH }
+      - { name: insert_dtm,      type: timestamp }
+
+  - label: Account
+    primary_key: account_id
+    volume: 4000000
+    columns:
+      - { name: account_id,       type: sequential_id }
+      - { name: account_number,   type: string_template, prefix: ACCT }
+      - { name: account_type,     type: category, values: [checking, savings, money_market, cd, credit, loan] }
+      - { name: status,           type: category, values: [active, dormant, closed, frozen] }
+      - { name: balance,          type: float, low: 0.0, high: 1000000.0 }
+      - { name: available_balance, type: float, low: 0.0, high: 1000000.0 }
+      - { name: opened_at,        type: date }
+      - { name: closed_at,        type: date }
+      - { name: interest_rate,    type: float, low: 0.0, high: 0.15 }
+      - { name: overdraft_limit,  type: float, low: 0.0, high: 50000.0 }
+      - { name: minimum_balance,  type: float, low: 0.0, high: 5000.0 }
+      - { name: tax_status,       type: category, values: [taxable, tax_exempt, tax_deferred] }
+      - { name: dormancy_days,    type: int, low: 0, high: 3650 }
+      - { name: source_system,    type: category, values: [core, mobile, branch, partner] }
+      - { name: created_at,       type: timestamp }
+      - { name: updated_at,       type: timestamp }
+      - { name: insert_dtm,       type: timestamp }
+
+  - label: Transaction
+    primary_key: transaction_id
+    volume: 6000000
+    columns:
+      - { name: transaction_id, type: sequential_id }
+      - { name: txn_ref,        type: string_template, prefix: TXN }
+      - { name: txn_type,       type: category, values: [debit, credit, transfer, payment, refund, fee] }
+      - { name: amount,         type: float, low: 0.01, high: 100000.0 }
+      - { name: currency,       type: category, values: [USD, EUR, GBP, JPY, INR, CAD, AUD, BRL] }
+      - { name: status,         type: category, values: [pending, completed, failed, reversed] }
+      - { name: txn_date,       type: date }
+      - { name: posted_at,      type: timestamp }
+      - { name: settlement_date, type: date }
+      - { name: description,    type: string_template, prefix: DESC }
+      - { name: fraud_score,    type: float, low: 0.0, high: 1.0 }
+      - { name: insert_dtm,     type: timestamp }
+
+  - label: Address
+    primary_key: address_id
+    volume: 3000000
+    columns:
+      - { name: address_id,    type: sequential_id }
+      - { name: line1,         type: string_template, prefix: L1 }
+      - { name: line2,         type: string_template, prefix: L2 }
+      - { name: city,          type: category, values: [NYC, LA, CHI, HOU, PHX, PHL, SAT, SD, DAL, AUS] }
+      - { name: state,         type: category, values: [NY, CA, IL, TX, AZ, PA, FL, OH, GA, NC] }
+      - { name: postal_code,   type: int, low: 10000, high: 99999 }
+      - { name: address_type,  type: category, values: [home, work, billing, shipping, other] }
+      - { name: is_primary,    type: bool }
+      - { name: verified,      type: bool }
+      - { name: created_at,    type: timestamp }
+      - { name: insert_dtm,    type: timestamp }
+
+  - label: Phone
+    primary_key: phone_id
+    volume: 2000000
+    columns:
+      - { name: phone_id,    type: sequential_id }
+      - { name: phone_number, type: string_template, prefix: PN }
+      - { name: phone_type,  type: category, values: [mobile, home, work, fax] }
+      - { name: is_primary,  type: bool }
+      - { name: verified,    type: bool }
+      - { name: insert_dtm,  type: timestamp }
+
+  - label: Email
+    primary_key: email_id
+    volume: 2000000
+    columns:
+      - { name: email_id,    type: sequential_id }
+      - { name: email_addr,  type: string_template, prefix: EM }
+      - { name: is_primary,  type: bool }
+      - { name: verified,    type: bool }
+      - { name: insert_dtm,  type: timestamp }
+
+  - label: Card
+    primary_key: card_id
+    volume: 2000000
+    columns:
+      - { name: card_id,        type: sequential_id }
+      - { name: card_number_hash, type: string_template, prefix: CN }
+      - { name: card_type,      type: category, values: [debit, credit, prepaid, gift] }
+      - { name: network,        type: category, values: [visa, mastercard, amex, discover, jcb] }
+      - { name: status,         type: category, values: [active, blocked, expired, lost, stolen] }
+      - { name: issued_at,      type: date }
+      - { name: expires_at,     type: date }
+      - { name: credit_limit,   type: float, low: 100.0, high: 100000.0 }
+      - { name: insert_dtm,     type: timestamp }
+
+  - label: Device
+    primary_key: device_id
+    volume: 4000000
+    columns:
+      - { name: device_id,    type: sequential_id }
+      - { name: device_type,  type: category, values: [iphone, android, web, tablet, atm, kiosk] }
+      - { name: os,           type: category, values: [ios, android, windows, macos, linux] }
+      - { name: os_version,   type: category, values: [v15, v16, v17, v18, v19] }
+      - { name: app_version,  type: string_template, prefix: APP }
+      - { name: device_hash,  type: string_template, prefix: DH }
+      - { name: trusted,      type: bool }
+      - { name: first_seen,   type: timestamp }
+      - { name: insert_dtm,   type: timestamp }
+
+  - label: SessionLog
+    primary_key: session_id
+    volume: 6000000
+    columns:
+      - { name: session_id,   type: sequential_id }
+      - { name: started_at,   type: timestamp }
+      - { name: ended_at,     type: timestamp }
+      - { name: duration_sec, type: int, low: 1, high: 7200 }
+      - { name: ip_hash,      type: string_template, prefix: IP }
+      - { name: user_agent,   type: string_template, prefix: UA }
+      - { name: outcome,      type: category, values: [success, failed, abandoned] }
+      - { name: insert_dtm,   type: timestamp }
+
+  - label: Document
+    primary_key: document_id
+    volume: 1000000
+    columns:
+      - { name: document_id,  type: sequential_id }
+      - { name: doc_type,     type: category, values: [passport, drivers_license, ssn, utility_bill, tax_return, paystub] }
+      - { name: doc_number_hash, type: string_template, prefix: DN }
+      - { name: issued_at,    type: date }
+      - { name: expires_at,   type: date }
+      - { name: status,       type: category, values: [valid, expired, revoked, pending] }
+      - { name: verified,     type: bool }
+      - { name: country,      type: category, values: [US, UK, IN, CA, AU, DE, FR, JP, BR, MX] }
+      - { name: storage_url_hash, type: string_template, prefix: SU }
+      - { name: insert_dtm,   type: timestamp }
+
+  - label: Beneficiary
+    primary_key: beneficiary_id
+    volume: 500000
+    columns:
+      - { name: beneficiary_id, type: sequential_id }
+      - { name: name,           type: string_template, prefix: BN }
+      - { name: relationship,   type: category, values: [spouse, child, parent, sibling, other] }
+      - { name: percentage,     type: float, low: 0.0, high: 1.0 }
+      - { name: insert_dtm,     type: timestamp }
+
+  - label: Loan
+    primary_key: loan_id
+    volume: 300000
+    columns:
+      - { name: loan_id,       type: sequential_id }
+      - { name: loan_type,     type: category, values: [mortgage, auto, personal, student, business] }
+      - { name: principal,     type: float, low: 1000.0, high: 1000000.0 }
+      - { name: interest_rate, type: float, low: 0.01, high: 0.25 }
+      - { name: term_months,   type: int, low: 6, high: 360 }
+      - { name: status,        type: category, values: [active, paid_off, default, refinanced] }
+      - { name: opened_at,     type: date }
+      - { name: insert_dtm,    type: timestamp }
+
+  - label: Investment
+    primary_key: investment_id
+    volume: 200000
+    columns:
+      - { name: investment_id, type: sequential_id }
+      - { name: instrument,    type: category, values: [equity, bond, etf, mutual_fund, crypto, commodity] }
+      - { name: ticker,        type: string_template, prefix: TKR }
+      - { name: quantity,      type: float, low: 0.0, high: 100000.0 }
+      - { name: cost_basis,    type: float, low: 0.0, high: 1000000.0 }
+      - { name: insert_dtm,    type: timestamp }
+
+  - label: Employer
+    primary_key: employer_id
+    volume: 50000
+    columns:
+      - { name: employer_id, type: sequential_id }
+      - { name: name,        type: string_template, prefix: EMP }
+      - { name: industry,    type: category, values: [tech, finance, healthcare, retail, manufacturing, education, govt] }
+      - { name: size_band,   type: category, values: [1-10, 11-50, 51-200, 201-1000, 1001-5000, 5000+] }
+      - { name: insert_dtm,  type: timestamp }
+
+  - label: Merchant
+    primary_key: merchant_id
+    volume: 30000
+    columns:
+      - { name: merchant_id, type: sequential_id }
+      - { name: name,        type: string_template, prefix: MERCH }
+      - { name: category,    type: category, values: [grocery, restaurant, retail, online, travel, gas, utility, other] }
+      - { name: mcc,         type: int, low: 1000, high: 9999 }
+      - { name: insert_dtm,  type: timestamp }
+
+  - label: Branch
+    primary_key: branch_id
+    volume: 2000
+    columns:
+      - { name: branch_id,   type: sequential_id }
+      - { name: branch_code, type: string_template, prefix: BR }
+      - { name: city,        type: category, values: [NYC, LA, CHI, HOU, PHX, PHL, SAT, SD, DAL, AUS] }
+      - { name: state,       type: category, values: [NY, CA, IL, TX, AZ, PA, FL, OH, GA, NC] }
+      - { name: insert_dtm,  type: timestamp }
+
+  - label: Campaign
+    primary_key: campaign_id
+    volume: 500
+    columns:
+      - { name: campaign_id, type: sequential_id }
+      - { name: name,        type: string_template, prefix: CAMP }
+      - { name: channel,     type: category, values: [email, sms, push, banner, social] }
+      - { name: started_at,  type: date }
+      - { name: ended_at,    type: date }
+      - { name: insert_dtm,  type: timestamp }
+
+  - label: Product
+    primary_key: product_id
+    volume: 100
+    columns:
+      - { name: product_id, type: sequential_id }
+      - { name: name,       type: string_template, prefix: PROD }
+      - { name: category,   type: category, values: [checking, savings, credit, loan, investment, insurance] }
+      - { name: insert_dtm, type: timestamp }
+
+  - label: Channel
+    primary_key: channel_id
+    volume: 20
+    columns:
+      - { name: channel_id, type: sequential_id }
+      - { name: name,       type: category, values: [web, mobile, branch, phone, atm, partner, api, sms, email, push, social, qr, voice, agent, kiosk, ivr, chat, video, mail, other] }
+      - { name: insert_dtm, type: timestamp }
+
+  - label: Country
+    primary_key: country_code
+    volume: 250
+    columns:
+      - { name: country_code, type: sequential_id }
+      - { name: name,         type: string_template, prefix: CTRY }
+      - { name: region,       type: category, values: [NA, EU, APAC, LATAM, MEA] }
+      - { name: insert_dtm,   type: timestamp }
+
+  - label: Currency
+    primary_key: currency_code
+    volume: 50
+    columns:
+      - { name: currency_code, type: sequential_id }
+      - { name: code,          type: string_template, prefix: CUR }
+      - { name: insert_dtm,    type: timestamp }
+
+  - label: RiskRating
+    primary_key: risk_id
+    volume: 5
+    columns:
+      - { name: risk_id, type: sequential_id }
+      - { name: label,   type: category, values: [low, medium, high, critical, unrated] }
+      - { name: score,   type: int, low: 1, high: 1000 }
+      - { name: insert_dtm, type: timestamp }
+
+
+relationships:
+  # Each rel: source PK -> target PK + insert_dtm + at most 1 narrow attr (matching customer's shape).
+
+  - type: HAS_ACCOUNT
+    source: { label: Customer, key: customer_id }
+    target: { label: Account,  key: account_id }
+    volume: 3000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: HAS_ADDRESS
+    source: { label: Customer, key: customer_id }
+    target: { label: Address,  key: address_id }
+    volume: 3000000
+    properties:
+      - { name: is_primary, type: bool }
+      - { name: insert_dtm, type: timestamp }
+
+  - type: HAS_PHONE
+    source: { label: Customer, key: customer_id }
+    target: { label: Phone,    key: phone_id }
+    volume: 2000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: HAS_EMAIL
+    source: { label: Customer, key: customer_id }
+    target: { label: Email,    key: email_id }
+    volume: 2000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: HAS_DOCUMENT
+    source: { label: Customer,  key: customer_id }
+    target: { label: Document,  key: document_id }
+    volume: 1000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: HAS_DEVICE
+    source: { label: Customer, key: customer_id }
+    target: { label: Device,   key: device_id }
+    volume: 2000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: HAS_CARD
+    source: { label: Customer, key: customer_id }
+    target: { label: Card,     key: card_id }
+    volume: 1500000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: LIVES_IN
+    source: { label: Customer, key: customer_id }
+    target: { label: Country,  key: country_code }
+    volume: 2000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: WORKS_FOR
+    source: { label: Customer, key: customer_id }
+    target: { label: Employer, key: employer_id }
+    volume: 1000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: RATED_AS
+    source: { label: Customer,   key: customer_id }
+    target: { label: RiskRating, key: risk_id }
+    volume: 2000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: IN_CAMPAIGN
+    source: { label: Customer, key: customer_id }
+    target: { label: Campaign, key: campaign_id }
+    volume: 500000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: HAS_TRANSACTION
+    source: { label: Account,     key: account_id }
+    target: { label: Transaction, key: transaction_id }
+    volume: 5000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: AT_BRANCH_ACCT
+    source: { label: Account, key: account_id }
+    target: { label: Branch,  key: branch_id }
+    volume: 2000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: IN_CURRENCY_ACCT
+    source: { label: Account,  key: account_id }
+    target: { label: Currency, key: currency_code }
+    volume: 2000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: FOR_PRODUCT
+    source: { label: Account, key: account_id }
+    target: { label: Product, key: product_id }
+    volume: 2000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: HAS_BENEFICIARY
+    source: { label: Account,     key: account_id }
+    target: { label: Beneficiary, key: beneficiary_id }
+    volume: 400000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: LINKED_TO
+    source: { label: Account, key: account_id }
+    target: { label: Account, key: account_id }
+    volume: 500000
+    properties:
+      - { name: link_type,  type: category, values: [transfer, joint, beneficiary] }
+      - { name: insert_dtm, type: timestamp }
+
+  - type: AT_MERCHANT
+    source: { label: Transaction, key: transaction_id }
+    target: { label: Merchant,    key: merchant_id }
+    volume: 2500000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: VIA_CHANNEL_TXN
+    source: { label: Transaction, key: transaction_id }
+    target: { label: Channel,     key: channel_id }
+    volume: 3000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: IN_COUNTRY_TXN
+    source: { label: Transaction, key: transaction_id }
+    target: { label: Country,     key: country_code }
+    volume: 2000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: IN_CURRENCY_TXN
+    source: { label: Transaction, key: transaction_id }
+    target: { label: Currency,    key: currency_code }
+    volume: 3000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: USED_CARD
+    source: { label: Transaction, key: transaction_id }
+    target: { label: Card,        key: card_id }
+    volume: 1500000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: USED_DEVICE_TXN
+    source: { label: Transaction, key: transaction_id }
+    target: { label: Device,      key: device_id }
+    volume: 1500000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: AT_BRANCH_CARD
+    source: { label: Card,   key: card_id }
+    target: { label: Branch, key: branch_id }
+    volume: 1000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: FOR_CUSTOMER_LOAN
+    source: { label: Loan,     key: loan_id }
+    target: { label: Customer, key: customer_id }
+    volume: 250000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: AT_BRANCH_LOAN
+    source: { label: Loan,   key: loan_id }
+    target: { label: Branch, key: branch_id }
+    volume: 250000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: HELD_BY
+    source: { label: Investment, key: investment_id }
+    target: { label: Customer,   key: customer_id }
+    volume: 150000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: FOR_CUSTOMER_SES
+    source: { label: SessionLog, key: session_id }
+    target: { label: Customer,   key: customer_id }
+    volume: 3000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: VIA_DEVICE_SES
+    source: { label: SessionLog, key: session_id }
+    target: { label: Device,     key: device_id }
+    volume: 3000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: VIA_CHANNEL_SES
+    source: { label: SessionLog, key: session_id }
+    target: { label: Channel,    key: channel_id }
+    volume: 3000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: ADDR_IN_COUNTRY
+    source: { label: Address, key: address_id }
+    target: { label: Country, key: country_code }
+    volume: 1500000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: PHONE_IN_COUNTRY
+    source: { label: Phone,   key: phone_id }
+    target: { label: Country, key: country_code }
+    volume: 1000000
+    properties:
+      - { name: insert_dtm, type: timestamp }
+
+  - type: VERIFIED_BY
+    source: { label: Document, key: document_id }
+    target: { label: Branch,   key: branch_id }
+    volume: 500000
+    properties:
+      - { name: insert_dtm, type: timestamp }

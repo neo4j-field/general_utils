@@ -1,0 +1,27 @@
+# Never commit data or credentials to this repo.
+*.parquet
+data/
+parquet/
+results/*
+!results/full_run_*.csv
+*.log
+
+# Aura credentials (any text file containing NEO4J_PASSWORD)
+Neo4j-*-Created-*.txt
+*credentials*.txt
+.env
+.env.*
+
+# Python venv / build artifacts
+__pycache__/
+*.pyc
+.venv*/
+.pytest_cache/
+
+# Spark
+metastore_db/
+spark-warehouse/
+derby.log
+
+# OS
+.DS_Store
