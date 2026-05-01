@@ -15,9 +15,16 @@ Why this loader matters for the customer's transaction-memory problem:
      nodes" path with a thin MATCH(src{k}) MATCH(tgt{k}) CREATE
      pattern. Per-transaction memory drops by 5-10x.
 
-  3. `batch.size` is parametrized. The customer is almost certainly
-     using a default (or oversized) value. We default to 5000 here
-     and surface it as a CLI flag.
+  3. `batch.size` is parametrized SEPARATELY for nodes and relationships,
+     because the right value differs by phase:
+       - Nodes: 5000. Each node row is wide (up to 33 columns). Bigger
+         batches do not help and can trip per-transaction memory.
+       - Rels: 50000 (configurable up to ~100000). With unique constraints
+         pre-created and `relationship.save.strategy=keys` in effect, each
+         rel row is a thin `MATCH(src{k}) MATCH(tgt{k}) CREATE` with very
+         small per-row memory. The bottleneck on the single-thread rel
+         writer is sync round-trip count over Bolt, not transaction memory,
+         and bigger batches attack that bottleneck directly.
 
   4. Each rel dataframe is repartitioned on the source key. This
      groups writes for the same source node into the same Spark
@@ -28,7 +35,8 @@ Usage:
         --config bulk_load/config/data_model.yaml \
         --parquet-dir /var/data/parquet \
         --credentials /path/to/Neo4j-xxxx.txt \
-        --batch-size 5000 \
+        --node-batch-size 5000 \
+        --rel-batch-size 50000 \
         --partitions 8 \
         --jar $HOME/jars/neo4j-connector-apache-spark_2.12-5.3.10_for_spark_3.jar \
         --node-mode merge \
@@ -66,10 +74,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--user")
     p.add_argument("--password")
     p.add_argument("--database", default="neo4j")
-    p.add_argument("--batch-size", type=int, default=5000,
-                   help="Connector batch.size. Default 5000. Customer's "
-                        "transaction-memory issue is usually solved by a "
-                        "modest value here, not a large one.")
+    p.add_argument("--node-batch-size", type=int, default=5000,
+                   help="Connector batch.size for NODE writes. Default 5000. "
+                        "Node rows can be wide (up to 33 columns); larger "
+                        "batches risk per-transaction memory pressure on the "
+                        "receiver and do not improve throughput meaningfully.")
+    p.add_argument("--rel-batch-size", type=int, default=50000,
+                   help="Connector batch.size for RELATIONSHIP writes. "
+                        "Default 50000. With unique constraints pre-created "
+                        "and `relationship.save.strategy=keys` in effect, each "
+                        "rel write is memory-light, and the bottleneck on the "
+                        "single-thread rel writer is sync round-trip count "
+                        "over Bolt. Larger batches reduce the round-trip "
+                        "count directly. Reasonable upper bound on a "
+                        "memory-rich receiver (128GB Aura): 100000.")
     p.add_argument("--partitions", type=int, default=8,
                    help="Spark partitions for NODE writes. Default 8.")
     p.add_argument("--rel-partitions", type=int, default=1,
@@ -239,12 +257,15 @@ def main() -> int:
     uri, user, password, database = resolve_creds(args)
     cfg = yaml.safe_load(args.config.read_text())
 
-    creds = common_options(uri, user, password, database, args.batch_size)
+    node_creds = common_options(uri, user, password, database, args.node_batch_size)
+    rel_creds = common_options(uri, user, password, database, args.rel_batch_size)
 
     print(f"Target:        {uri}  db={database}")
     print(f"Parquet dir:   {args.parquet_dir}")
-    print(f"Batch size:    {args.batch_size}")
-    print(f"Partitions:    {args.partitions}")
+    print(f"Node batch:    {args.node_batch_size}")
+    print(f"Rel batch:     {args.rel_batch_size}")
+    print(f"Node parts:    {args.partitions}")
+    print(f"Rel parts:     {args.rel_partitions}  (hot threshold: {args.hot_rel_threshold})")
     print(f"Node mode:     {args.node_mode}")
     print(f"Spark jar:     {args.jar}")
     print()
@@ -267,7 +288,7 @@ def main() -> int:
                 print(f"  SKIP (missing): {pq_path}")
                 continue
             results.append(load_node(spark, pq_path, label, n["primary_key"],
-                                     creds, args.partitions, args.node_mode))
+                                     node_creds, args.partitions, args.node_mode))
         print()
 
     if not args.skip_rels:
@@ -289,7 +310,7 @@ def main() -> int:
                 r["source"]["label"], r["source"]["key"],
                 tgt_label, r["target"]["key"],
                 tgt_volume,
-                creds, args.rel_partitions, args.hot_rel_threshold,
+                rel_creds, args.rel_partitions, args.hot_rel_threshold,
             ))
         print()
 

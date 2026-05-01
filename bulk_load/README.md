@@ -29,7 +29,7 @@ Node ingestion is fine for them. The pain is in relationships.
 |---|---|
 | No unique constraint on node primary keys → every rel MERGE does a label scan, which serializes into the transaction. | `schema_setup.py` creates a unique constraint on every node PK before any data load. |
 | Spark Connector default rel-write rebuilds full source/target nodes per batch. | `relationship.save.strategy=keys` forces a thin `MATCH(src{k}) MATCH(tgt{k}) CREATE` pattern. |
-| `batch.size` set too high (or default left unchanged after schema growth). | `--batch-size` exposed as a CLI flag, default 5000. |
+| `batch.size` set too high for nodes, or set too low for rels once the other fixes are in place. | `--node-batch-size` (default 5000) and `--rel-batch-size` (default 50000) split. Nodes are wide, so a modest value avoids transaction-memory pressure; rels are memory-light once constraints + `save.strategy=keys` are active, so larger batches reduce sync round-trip count on the single-thread writer. |
 | Forseti deadlocks on adjacent-node locks under any non-trivial rel-write parallelism. | Default `rel-partitions=1`. See **Two non-obvious gotchas** below. |
 | Hot dimension targets (e.g. 5 RiskRatings shared by millions of rels) deadlock instantly. | `--hot-rel-threshold` (default 1000): rels whose target volume is below this auto-fall back to single-partition writes. |
 
@@ -71,10 +71,12 @@ expected, so this gotcha is local-mode-only.
         ├── src/generate_synthetic_data.py (reads YAML → writes parquet, vectorized numpy)
         ├── src/schema_setup.py            (reads YAML → creates unique constraints)
         ├── src/load_to_neo4j.py           (reads YAML + parquet → Spark Connector write)
+        ├── src/aura_lifecycle.py          (Aura public API client: auth, CRUD, polling)
+        ├── src/recreate_instance.py       (optional: delete + recreate Aura instance)
         │
         └── scripts/
             ├── provision_vm.sh            (idempotent VM bootstrap: Java, Python, jars)
-            └── run_load_benchmark.sh      (orchestrates: generate → schema → load → CSV)
+            └── run_load_benchmark.sh      (orchestrates: [recreate] → wipe → generate → schema → load → CSV)
 ```
 
 The YAML drives everything. Change a column type or volume in one place
@@ -97,10 +99,13 @@ and all three Python scripts pick it up.
 5. **Unique constraints created BEFORE any load, not after.** Creating
    constraints after the data lands forces a full re-scan and is the
    slowest possible path.
-6. **`batch.size=5000` default, not larger.** Counterintuitive for
-   nodes (where bigger is faster) but correct for narrow relationships
-   on a memory-constrained instance. Customer's pain is solved by a
-   modest value here, not a large one.
+6. **Different `batch.size` for nodes (5000) and rels (50000).** Nodes
+   are wide, so 5000 keeps per-transaction memory pressure off the
+   receiver; bigger batches do not help. Rels, by contrast, are
+   memory-light once `relationship.save.strategy=keys` and the unique
+   constraints are in place, so the bottleneck shifts to sync
+   round-trip count on the single-thread writer. 50000 attacks that
+   bottleneck directly; 100000 is reasonable on a memory-rich receiver.
 7. **Synthetic data is intentionally `garbage-in`.** No faker, no real
    PII. The point is to exercise the load path at volume; the data
    semantics don't matter.
@@ -126,22 +131,111 @@ SCALE=0.01 ./bulk_load/scripts/run_load_benchmark.sh ~/Neo4j-*.txt
 
 | Var | Default | What it controls |
 |---|---|---|
-| `BATCH_SIZE` | `5000` | Rows per Bolt transaction. The single most important fix for transaction memory. |
+| `NODE_BATCH_SIZE` | `5000` | Rows per Bolt transaction for node writes. Wider rows; a modest value avoids transaction-memory pressure. |
+| `REL_BATCH_SIZE` | `50000` | Rows per Bolt transaction for relationship writes. With constraints + `save.strategy=keys` in place, rels are memory-light and the bottleneck is round-trip count on the single-thread writer. Reasonable upper bound on a 128 GB Aura: 100000. |
 | `PARTITIONS` | `8` | Spark partitions for NODE writes. Nodes don't lock-contend, so saturate the writer side. |
 | `REL_PARTITIONS` | `1` | Spark partitions for RELATIONSHIP writes. Default 1 to avoid Forseti deadlocks. Raise only after testing. |
 | `HOT_REL_THRESHOLD` | `1000` | Rel types whose TARGET node count is below this force-fall back to 1-partition writes. |
 | `NODE_MODE` | `merge` | `merge` is idempotent (uses upsert via `node.keys`); `create` skips upsert check, ~2x faster, fresh-load only. |
 | `SCALE` | `1.0` | Multiplier on every YAML volume. Use `0.01` for a smoke test. |
+| `WIPE_BEFORE_LOAD` | `auto` | Wipe the database before phase 2 by calling the parent directory's `reset_to_blank_neo4j_db.sh`. `auto` means wipe whenever load is happening on a non-fresh instance; `true` always wipes; `false` skips (e.g. for additive loads). |
+| `RESET_SCRIPT` | `$MODULE_DIR/../reset_to_blank_neo4j_db.sh` | Path to the wipe script. Override only if you have moved the reset script. |
 | `SKIP_GENERATE` | `false` | Reuse existing parquet. |
 | `SKIP_SCHEMA` | `false` | Skip constraint creation. |
 | `SKIP_LOAD` | `false` | Stop after generation/schema (e.g. for size-on-disk inspection). |
 | `PARQUET_DIR` | `$HOME/data/parquet` | Where parquet lives. |
 | `RESULTS_DIR` | `$HOME/results` | Per-run CSV + log directory. |
 
+## Fresh-instance benchmarking (optional)
+
+For repeatable benchmark numbers, a brand-new Aura instance is a cleaner
+substrate than a reset of an existing one. A fresh instance has no warm
+page cache, no leftover schema fragments, and no WAL replay history;
+those are the kinds of carryover effects that make two runs of the
+"same" benchmark land on different rows-per-second numbers. For
+day-to-day operations, `reset_to_blank_neo4j_db.sh` from the parent
+`general_utils/` directory is fine. For benchmark validation, recreate.
+
+`run_load_benchmark.sh` accepts an opt-in `RECREATE_INSTANCE=true` flag
+that runs `src/recreate_instance.py` before phase 1. The lifecycle steps
+are:
+
+1. Authenticate to the Aura public API at `api.neo4j.io` using OAuth2
+   client credentials.
+2. Capture the target instance's full config (region, type, memory,
+   cloud provider, plugin flags) so the new instance is byte-identical
+   to the old.
+3. Delete the existing instance and poll until it is gone.
+4. Create a new instance with the captured config and poll until status
+   is `running`.
+5. Write the new connection URL and one-time password into a
+   credentials file at `$FRESH_CREDS_FILE`. The rest of the run uses
+   this file, regardless of which credentials were passed in
+   positionally.
+
+### Required environment variables
+
+| Var | What it controls |
+|---|---|
+| `RECREATE_INSTANCE=true` | Opt-in switch; default off. |
+| `AURA_API_CREDENTIALS` | Path to a file containing `CLIENT_ID` and `CLIENT_SECRET` for the Aura public API. Issued in the Aura console under Account → API keys. Same parsing format as the Neo4j DB credentials files used elsewhere in this repo. |
+| `AURA_INSTANCE_ID` | The 8-character instance ID (e.g. `27ad415a`) to delete and recreate. Required; no fuzzy name matching. |
+| `AURA_CUSTOM_ENDPOINT` | Optional. Printed in the recreate summary as a manual-rebind reminder. |
+| `FRESH_CREDS_FILE` | Optional. Default `$HOME/Neo4j-fresh-credentials.txt`. Where the new instance's credentials are written (mode 0600). Any existing file at this path is moved to `.bak` before overwrite. |
+
+### Custom endpoints are rebound manually
+
+Custom endpoint binding is not in the lifecycle script. The Aura public
+API returns `403 forbidden` on the custom-endpoints surface for the
+OAuth keys provisioned for ordinary tenant operations, so the rebind
+happens in the console: Custom endpoints → Configure → select the new
+instance from the dropdown. One click. If `AURA_CUSTOM_ENDPOINT` is
+set, the recreate summary prints a reminder with the endpoint URL and
+the new instance ID so it is obvious what to point at.
+
+### Example invocation
+
+```bash
+RECREATE_INSTANCE=true \
+AURA_API_CREDENTIALS=~/Neo4j-credentials-Agent_Key.txt \
+AURA_INSTANCE_ID=27ad415a \
+AURA_CUSTOM_ENDPOINT="neo4j+s://custom-ep-pro-32-3rhw-9gff.endpoints.neo4j.io" \
+./bulk_load/scripts/run_load_benchmark.sh ~/Neo4j-old-credentials.txt
+```
+
+The positional credentials file is still required (the script enforces
+its existing CLI shape), but its contents are immediately superseded by
+the freshly-written ones once the recreate completes. Total recreate
+time is typically 5 to 10 minutes; the loader run starts as soon as the
+new instance reaches `running`.
+
+### Safety guardrails in the lifecycle script
+
+`recreate_instance.py` is destructive. The defaults are conservative:
+
+- `--instance-id` is required; there is no fuzzy name matching.
+- Without `--yes`, the script prints the full instance config and
+  requires the operator to retype the instance name to proceed.
+- `--dry-run` shows the plan and exits without making any mutating
+  call.
+- The new credentials file is written with mode 0600. Any file at the
+  output path is moved to `.bak` before overwrite, so a previous
+  fresh-creds file is not silently destroyed.
+- The one-time Aura password is shown only at create time. The script
+  persists it before any further work; if the wait-until-running step
+  later times out, the credentials file is still written so the
+  operator can recover manually.
+
+`run_load_benchmark.sh` invokes the script with `--yes` because the
+benchmark runner is unattended. If you want the interactive prompt, run
+`recreate_instance.py` directly first, then run `run_load_benchmark.sh`
+without `RECREATE_INSTANCE=true` and pass the freshly-written
+credentials file as the positional argument.
+
 ## Output
 
 Each run writes:
-- `results/load_<timestamp>_b<batch>_p<parts>_<mode>.csv` — per-table rows / seconds / rows-per-sec, plus a TOTAL row.
+- `results/load_<timestamp>_n<node-batch>r<rel-batch>_p<parts>_<mode>.csv` — per-table rows / seconds / rows-per-sec, plus a TOTAL row.
 - `results/load_<timestamp>_*.log` — full run output for post-hoc analysis.
 
 ## Benchmark results
@@ -221,9 +315,31 @@ These translate directly to their 128 GB / 24 CPU / 213 M rel environment:
 1. **Run the loader from a VM in the same region/zone as the Aura instance.** Pre-test, this alone is often a 5-10x speedup.
 2. **Pre-create unique constraints on all node PKs before any load.** Even if the loader does it, surface this as an explicit pre-step so it isn't accidentally skipped.
 3. **Always set `relationship.save.strategy=keys`.** This is the single biggest connector option for narrow-rel loads.
-4. **Start `batch.size` at 5000 and only raise it if monitoring shows transaction memory has headroom.** Bigger is not always better.
+4. **Use different `batch.size` values for nodes and relationships.** 5000 for nodes (rows are wide and bigger batches risk transaction-memory pressure on the receiver). 50000 for rels, raising to 100000 once monitoring confirms transaction memory has headroom. Bigger is not better for nodes; for rels, with the constraints + `save.strategy=keys` fixes in place, bigger directly attacks the dominant cost (sync round-trips on the single-thread writer).
 5. **Repartition on the source key before write.** A few extra seconds of shuffle pays itself back many times in reduced lock contention.
 6. **Load all nodes before any relationships.** The MATCH on the rel side is only fast if the source/target nodes already exist.
+
+## Environment and Aura-side fine-tuning
+
+The four code-level fixes above solve the transaction-memory problem, but they are not the whole picture. The recommendations below are environmental and Aura-side knobs that compound on top of the loader fixes. Each is individually worth 10-30%; together they are the difference between a clean 2-3 hour customer run and one that fights the platform the whole way.
+
+1. **Colocate the loader with Aura at the network level.** Same region is mandatory. Same zone shaves another fraction of a millisecond off RTT and is free if you can pick it. On Aura Enterprise or Virtual Dedicated Cloud, use Private Service Connect (GCP) or PrivateLink (AWS) to put a private endpoint inside your own VPC so the load traffic never touches the public internet. Bolt is a synchronous request/response protocol, so at 5000-row batches every batch is a round-trip. Going from cross-region (30-80 ms RTT) to same-region (<1 ms RTT) is the largest single non-code speedup we measured, often 5-10x.
+
+2. **Size the VM for the producer side, not the receiver.** Node writes use 8 Spark partitions by default, so any VM with 8 or more vCPUs keeps the writer side saturated. Relationship writes default to a single partition for deadlock safety, but the JVM still needs memory headroom for batch buffering and the Spark driver. For a 32 GB Aura, `n2-standard-8` is enough; for the customer's 128 GB Aura, step up to `n2-standard-16` so there is room to raise `rel-partitions` above 1 once their FK distribution is characterized. Local SSD for the parquet directory is non-negotiable; network-attached storage caps generation throughput at a fraction of what local NVMe delivers.
+
+3. **Disable CDC during the initial load.** Change Data Capture writes a second stream of change events to the transaction log on every commit. On a narrow relationship load that already pressures transaction memory, CDC compounds the cost and reduces effective batch capacity. Turn CDC off in the Aura console for the load window and re-enable it once the bulk load is complete. Downstream consumers can be backfilled from the loaded data separately; they do not need to see the load itself as a change stream.
+
+4. **Quiesce secondaries and read replicas.** Aura secondaries replay the primary's transaction log. Heavy reads on them during a bulk load both consume cluster bandwidth and create backpressure on the primary if they fall behind the WAL stream. Pause application traffic to secondaries for the load window, or detach and reattach them after.
+
+5. **Defer fulltext and vector indexes until after the data is loaded.** The unique constraints created by `schema_setup.py` are range/btree indexes and are cheap to maintain at write time. Fulltext (Lucene) and vector (HNSW) indexes are not. Every insert triggers a Lucene segment write or HNSW graph update, and that overhead does not show up in the per-transaction memory numbers because it lives on a separate write path. Create search and vector indexes once the data has landed; index population over an existing dataset is consistently faster than online maintenance during a 100 M-row load.
+
+6. **Minimize log verbosity for the load window.** Set query log and security log levels to `WARN` or `ERROR` in the Aura console for the duration of the load. At 5000-row batches, an 87 M-row relationship phase produces roughly 17,500 transactions for relationships alone. Per-transaction log lines are not free at that volume and they share I/O bandwidth with the WAL.
+
+7. **Schedule around the backup window.** Aura takes scheduled snapshots. They are throttled and rarely visible, but on a 90-minute load that overlaps with a snapshot you can see a 10-20% throughput dip. Check the backup schedule in the Aura console and run the load between windows when the option is available.
+
+8. **Start every benchmark from a known clean state.** Stale constraints, partial indexes, or leftover nodes from a prior failed attempt produce inconsistent timings and obscure which run is the real baseline. `run_load_benchmark.sh` does this automatically as phase 1 of every run via `WIPE_BEFORE_LOAD=auto`, which calls `reset_to_blank_neo4j_db.sh` from the parent `general_utils/` directory. The wipe is auto-skipped only when `RECREATE_INSTANCE=true` (the new instance is empty by construction). Set `WIPE_BEFORE_LOAD=false` only when you intend to append to an existing graph.
+
+9. **Run during a quiet window for the primary's application traffic.** Concurrent OLTP workload during the bulk load competes for page cache and CPU on the primary. Read queries do not conflict with writes at the lock level, but the 99% page cache hit ratio observed in our test assumed an idle instance. With mixed workload, cache hit drops, and every label lookup on the relationship-write path becomes more expensive. If a full maintenance window is not feasible, schedule the load for the lowest-traffic hours available.
 
 ## Not in scope (for now)
 
