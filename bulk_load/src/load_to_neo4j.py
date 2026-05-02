@@ -106,6 +106,17 @@ def parse_args() -> argparse.Namespace:
                         "force single-partition writes (no parallelism) "
                         "to avoid deadlocks on small dimension tables. "
                         "Default 1000.")
+    p.add_argument("--rel-overlap-threshold", type=float, default=2.0,
+                   help="Force single-partition writes for any rel where "
+                        "rel_volume / target_volume exceeds this ratio. "
+                        "Higher ratio means each target node is the "
+                        "destination of many rels in expectation, which "
+                        "guarantees lock contention across parallel "
+                        "writers and produces Forseti deadlocks. Default 2.0 "
+                        "is conservative: only rels with E[rels per target] "
+                        "<= 1.6 (in our synthetic dataset, all 16 'narrow' "
+                        "rels) get the parallel path. Tune up cautiously "
+                        "for workloads with low real target overlap.")
     p.add_argument("--jar", type=Path,
                    default=Path(os.environ.get("NEO4J_SPARK_CONNECTOR_JAR", "")),
                    help="Path to neo4j-connector-apache-spark JAR.")
@@ -208,19 +219,32 @@ def load_node(spark, parquet_path: Path, label: str, pk: str,
 def load_rel(spark, parquet_path: Path, rel_type: str,
              src_label: str, src_key: str,
              tgt_label: str, tgt_key: str,
-             tgt_volume: int,
+             tgt_volume: int, rel_volume: int,
              creds: dict[str, str], partitions: int,
-             hot_rel_threshold: int) -> dict:
-    # Hot-rel detection: if the target node count is small (e.g. Channel=20,
-    # RiskRating=5), every parallel writer will fight for exclusive locks
-    # on the same target nodes. Force single-partition write for these.
+             hot_rel_threshold: int,
+             rel_overlap_threshold: float) -> dict:
+    # Two independent gates force the rel write back to a single partition:
+    #   1. Small target dimension (tgt_volume < hot_rel_threshold). Even one
+    #      rel per target row guarantees overlap when the target table is
+    #      tiny.
+    #   2. High target reuse (rel_volume / tgt_volume > rel_overlap_threshold).
+    #      With uniform-random FKs, ratio R means each touched target is the
+    #      destination of ~R rels in expectation. Above ~2x reuse, parallel
+    #      writers compete for the same exclusive lock on the same target's
+    #      relationship group, and Forseti's deadlock detector kills one of
+    #      the writers. Retries can absorb a low rate but not a high one.
+    overlap_ratio = (rel_volume / tgt_volume) if tgt_volume > 0 else float("inf")
     effective_partitions = partitions
+    reason = ""
     if tgt_volume < hot_rel_threshold:
         effective_partitions = 1
-        hot_note = f"  (hot rel: tgt_volume={tgt_volume:,} < {hot_rel_threshold}, forcing 1 partition)"
-    else:
-        hot_note = ""
-    print(f"  Loading rel :{rel_type}  ({src_label})-[]->({tgt_label}){hot_note}")
+        reason = f"  (serial: small target dim, tgt_vol={tgt_volume:,} < {hot_rel_threshold})"
+    elif overlap_ratio > rel_overlap_threshold:
+        effective_partitions = 1
+        reason = f"  (serial: high target reuse, ratio={overlap_ratio:.2f} > {rel_overlap_threshold})"
+    elif partitions > 1:
+        reason = f"  (parallel: {partitions} partitions, ratio={overlap_ratio:.2f})"
+    print(f"  Loading rel :{rel_type}  ({src_label})-[]->({tgt_label}){reason}")
     t0 = time.time()
     df = spark.read.parquet(str(parquet_path))
     row_count = df.count()
@@ -268,7 +292,8 @@ def main() -> int:
     print(f"Node batch:    {args.node_batch_size}")
     print(f"Rel batch:     {args.rel_batch_size}")
     print(f"Node parts:    {args.partitions}")
-    print(f"Rel parts:     {args.rel_partitions}  (hot threshold: {args.hot_rel_threshold})")
+    print(f"Rel parts:     {args.rel_partitions}  (hot threshold: {args.hot_rel_threshold}, "
+          f"overlap threshold: {args.rel_overlap_threshold})")
     print(f"Node mode:     {args.node_mode}")
     print(f"Spark jar:     {args.jar}")
     print()
@@ -308,12 +333,14 @@ def main() -> int:
                 continue
             tgt_label = r["target"]["label"]
             tgt_volume = node_volumes.get(tgt_label, args.hot_rel_threshold + 1)
+            rel_volume = int(r["volume"])
             results.append(load_rel(
                 spark, pq_path, rel_type,
                 r["source"]["label"], r["source"]["key"],
                 tgt_label, r["target"]["key"],
-                tgt_volume,
-                rel_creds, args.rel_partitions, args.hot_rel_threshold,
+                tgt_volume, rel_volume,
+                rel_creds, args.rel_partitions,
+                args.hot_rel_threshold, args.rel_overlap_threshold,
             ))
         print()
 

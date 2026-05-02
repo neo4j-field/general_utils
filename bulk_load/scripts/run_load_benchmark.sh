@@ -23,7 +23,11 @@
 #   PARTITIONS           Default: 8      (Spark partitions for node writes)
 #   REL_PARTITIONS       Default: 1      (single-thread rel writes; raise only after
 #                                         empirical FK-distribution testing)
-#   HOT_REL_THRESHOLD    Default: 1000
+#   HOT_REL_THRESHOLD    Default: 1000   (force serial when tgt_volume < this)
+#   REL_OVERLAP_THRESHOLD Default: 2.0   (force serial when rel_vol/tgt_vol > this;
+#                                         catches rels with high target reuse that
+#                                         would otherwise deadlock under parallel
+#                                         writes regardless of source repartitioning)
 #   NODE_MODE            Default: merge  (merge | create)
 #   SCALE                Default: 1.0    (multiplier on all volumes; 0.01 for smoke test)
 #   SKIP_GENERATE        Default: false  (re-use existing parquet)
@@ -109,6 +113,7 @@ REL_BATCH_SIZE="${REL_BATCH_SIZE:-5000}"
 PARTITIONS="${PARTITIONS:-8}"
 REL_PARTITIONS="${REL_PARTITIONS:-1}"
 HOT_REL_THRESHOLD="${HOT_REL_THRESHOLD:-1000}"
+REL_OVERLAP_THRESHOLD="${REL_OVERLAP_THRESHOLD:-2.0}"
 NODE_MODE="${NODE_MODE:-merge}"
 SCALE="${SCALE:-1.0}"
 SKIP_GENERATE="${SKIP_GENERATE:-false}"
@@ -208,7 +213,7 @@ echo "  Parquet dir:  $PARQUET_DIR"
 echo "  Node batch:   $NODE_BATCH_SIZE"
 echo "  Rel batch:    $REL_BATCH_SIZE"
 echo "  Node parts:   $PARTITIONS"
-echo "  Rel parts:    $REL_PARTITIONS  (hot threshold: $HOT_REL_THRESHOLD)"
+echo "  Rel parts:    $REL_PARTITIONS  (hot threshold: $HOT_REL_THRESHOLD, overlap threshold: $REL_OVERLAP_THRESHOLD)"
 echo "  Node mode:    $NODE_MODE"
 echo "  Scale:        $SCALE"
 echo "  Wipe first:   $RUN_WIPE  ($WIPE_REASON)"
@@ -286,6 +291,7 @@ if [[ "$SKIP_LOAD" != "true" ]]; then
         --partitions "$PARTITIONS"
         --rel-partitions "$REL_PARTITIONS"
         --hot-rel-threshold "$HOT_REL_THRESHOLD"
+        --rel-overlap-threshold "$REL_OVERLAP_THRESHOLD"
         --node-mode "$NODE_MODE"
         --jar "$JAR"
         --results-csv "$RESULTS_CSV"
