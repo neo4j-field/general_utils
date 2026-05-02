@@ -29,7 +29,7 @@ Node ingestion is fine for them. The pain is in relationships.
 |---|---|
 | No unique constraint on node primary keys → every rel MERGE does a label scan, which serializes into the transaction. | `schema_setup.py` creates a unique constraint on every node PK before any data load. |
 | Spark Connector default rel-write rebuilds full source/target nodes per batch. | `relationship.save.strategy=keys` forces a thin `MATCH(src{k}) MATCH(tgt{k}) CREATE` pattern. |
-| `batch.size` set too high for nodes, or set too low for rels once the other fixes are in place. | `--node-batch-size` (default 5000) and `--rel-batch-size` (default 50000) split. Nodes are wide, so a modest value avoids transaction-memory pressure; rels are memory-light once constraints + `save.strategy=keys` are active, so larger batches reduce sync round-trip count on the single-thread writer. |
+| `batch.size` set too high for nodes blows up transaction memory. | `--node-batch-size` (default 5000) and `--rel-batch-size` (default 5000) are surfaced separately for tuning. Empirically tested: 50000 vs 5000 rel batches produced no measurable difference on the test workload, since per-transaction work scales linearly with batch size on the receiver. The right value to ship is 5000 for both, with the flags surfaced for unusual workloads. |
 | Forseti deadlocks on adjacent-node locks under any non-trivial rel-write parallelism. | Default `rel-partitions=1`. See **Two non-obvious gotchas** below. |
 | Hot dimension targets (e.g. 5 RiskRatings shared by millions of rels) deadlock instantly. | `--hot-rel-threshold` (default 1000): rels whose target volume is below this auto-fall back to single-partition writes. |
 
@@ -99,13 +99,17 @@ and all three Python scripts pick it up.
 5. **Unique constraints created BEFORE any load, not after.** Creating
    constraints after the data lands forces a full re-scan and is the
    slowest possible path.
-6. **Different `batch.size` for nodes (5000) and rels (50000).** Nodes
-   are wide, so 5000 keeps per-transaction memory pressure off the
-   receiver; bigger batches do not help. Rels, by contrast, are
-   memory-light once `relationship.save.strategy=keys` and the unique
-   constraints are in place, so the bottleneck shifts to sync
-   round-trip count on the single-thread writer. 50000 attacks that
-   bottleneck directly; 100000 is reasonable on a memory-rich receiver.
+6. **`batch.size` 5000 for both nodes and rels.** Nodes are wide, so
+   5000 keeps per-transaction memory pressure off the receiver; bigger
+   batches do not help. We initially shipped 50000 as the rel default
+   on the hypothesis that the single-thread rel writer's bottleneck
+   was sync round-trip count, but empirical testing showed no
+   measurable difference between 5000 and 50000. Per-transaction
+   work on the receiver (the MATCH+MATCH+CREATE per row) scales
+   linearly with batch size, so bigger batches just take longer.
+   Both flags are still surfaced for tuning workloads with unusual
+   shapes (very wide rel properties, vector attributes), but the
+   default is 5000.
 7. **Synthetic data is intentionally `garbage-in`.** No faker, no real
    PII. The point is to exercise the load path at volume; the data
    semantics don't matter.
@@ -132,7 +136,7 @@ SCALE=0.01 ./bulk_load/scripts/run_load_benchmark.sh ~/Neo4j-*.txt
 | Var | Default | What it controls |
 |---|---|---|
 | `NODE_BATCH_SIZE` | `5000` | Rows per Bolt transaction for node writes. Wider rows; a modest value avoids transaction-memory pressure. |
-| `REL_BATCH_SIZE` | `50000` | Rows per Bolt transaction for relationship writes. With constraints + `save.strategy=keys` in place, rels are memory-light and the bottleneck is round-trip count on the single-thread writer. Reasonable upper bound on a 128 GB Aura: 100000. |
+| `REL_BATCH_SIZE` | `5000` | Rows per Bolt transaction for relationship writes. Tested 50000 vs 5000 on the same workload; throughput was effectively unchanged (~10K rows/sec either way). Per-transaction work scales linearly with batch size, so bigger batches do not compress the rel phase. Surfaced separately from node batch size for tuning workloads with unusual rel shapes. |
 | `PARTITIONS` | `8` | Spark partitions for NODE writes. Nodes don't lock-contend, so saturate the writer side. |
 | `REL_PARTITIONS` | `1` | Spark partitions for RELATIONSHIP writes. Default 1 to avoid Forseti deadlocks. Raise only after testing. |
 | `HOT_REL_THRESHOLD` | `1000` | Rel types whose TARGET node count is below this force-fall back to 1-partition writes. |
@@ -315,7 +319,7 @@ These translate directly to their 128 GB / 24 CPU / 213 M rel environment:
 1. **Run the loader from a VM in the same region/zone as the Aura instance.** Pre-test, this alone is often a 5-10x speedup.
 2. **Pre-create unique constraints on all node PKs before any load.** Even if the loader does it, surface this as an explicit pre-step so it isn't accidentally skipped.
 3. **Always set `relationship.save.strategy=keys`.** This is the single biggest connector option for narrow-rel loads.
-4. **Use different `batch.size` values for nodes and relationships.** 5000 for nodes (rows are wide and bigger batches risk transaction-memory pressure on the receiver). 50000 for rels, raising to 100000 once monitoring confirms transaction memory has headroom. Bigger is not better for nodes; for rels, with the constraints + `save.strategy=keys` fixes in place, bigger directly attacks the dominant cost (sync round-trips on the single-thread writer).
+4. **Keep `batch.size` at 5000 for both nodes and rels.** We initially shipped 50000 as the rel default on the theory that bigger batches would compress sync round-trips on the single-thread writer. Empirically, no measurable difference vs 5000: per-transaction work on the receiver scales linearly with batch size, so bigger batches just take longer. Surface the flag for unusual workloads (very wide rel properties, vectors); ship 5000 by default. The dominant lever for the rel phase is parallelism, not batch size, and parallelism is constrained by Forseti deadlocks on shared target nodes (see `--rel-partitions`).
 5. **Repartition on the source key before write.** A few extra seconds of shuffle pays itself back many times in reduced lock contention.
 6. **Load all nodes before any relationships.** The MATCH on the rel side is only fast if the source/target nodes already exist.
 

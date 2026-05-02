@@ -13,8 +13,13 @@
 # Tunable env vars:
 #   PARQUET_DIR          Default: $HOME/data/parquet
 #   NODE_BATCH_SIZE      Default: 5000   (Spark Connector batch.size for node writes)
-#   REL_BATCH_SIZE       Default: 50000  (Spark Connector batch.size for rel writes;
-#                                         up to ~100000 on memory-rich receivers)
+#   REL_BATCH_SIZE       Default: 5000   (Spark Connector batch.size for rel writes.
+#                                         Empirically validated: 50000 produced no
+#                                         measurable speedup vs 5000 on the test
+#                                         workload, since per-transaction work
+#                                         scales linearly with batch size on the
+#                                         receiver. Surfaced for tuning, not for
+#                                         default sweeping.)
 #   PARTITIONS           Default: 8      (Spark partitions for node writes)
 #   REL_PARTITIONS       Default: 1      (single-thread rel writes; raise only after
 #                                         empirical FK-distribution testing)
@@ -100,7 +105,7 @@ MODULE_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
 
 PARQUET_DIR="${PARQUET_DIR:-$HOME/data/parquet}"
 NODE_BATCH_SIZE="${NODE_BATCH_SIZE:-5000}"
-REL_BATCH_SIZE="${REL_BATCH_SIZE:-50000}"
+REL_BATCH_SIZE="${REL_BATCH_SIZE:-5000}"
 PARTITIONS="${PARTITIONS:-8}"
 REL_PARTITIONS="${REL_PARTITIONS:-1}"
 HOT_REL_THRESHOLD="${HOT_REL_THRESHOLD:-1000}"

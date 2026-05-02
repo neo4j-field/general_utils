@@ -16,15 +16,16 @@ Why this loader matters for the customer's transaction-memory problem:
      pattern. Per-transaction memory drops by 5-10x.
 
   3. `batch.size` is parametrized SEPARATELY for nodes and relationships,
-     because the right value differs by phase:
-       - Nodes: 5000. Each node row is wide (up to 33 columns). Bigger
-         batches do not help and can trip per-transaction memory.
-       - Rels: 50000 (configurable up to ~100000). With unique constraints
-         pre-created and `relationship.save.strategy=keys` in effect, each
-         rel row is a thin `MATCH(src{k}) MATCH(tgt{k}) CREATE` with very
-         small per-row memory. The bottleneck on the single-thread rel
-         writer is sync round-trip count over Bolt, not transaction memory,
-         and bigger batches attack that bottleneck directly.
+     but empirically both default to 5000. We initially shipped 50000 for
+     rels on the hypothesis that the single-thread rel writer's bottleneck
+     was sync round-trip count over Bolt, so bigger batches would compress
+     the rel phase. Measured on a 32 GB business-critical Aura with the
+     same data and settings, 50000 vs 5000 rel batches produced essentially
+     identical throughput (~10K rows/s either way). Per-transaction work
+     on the receiver (the MATCH+MATCH+CREATE per row) scales linearly
+     with batch size, so bigger batches just take proportionally longer.
+     Both flags are still surfaced for tuning on workloads that may
+     behave differently, but the default is 5000.
 
   4. Each rel dataframe is repartitioned on the source key. This
      groups writes for the same source node into the same Spark
@@ -36,7 +37,7 @@ Usage:
         --parquet-dir /var/data/parquet \
         --credentials /path/to/Neo4j-xxxx.txt \
         --node-batch-size 5000 \
-        --rel-batch-size 50000 \
+        --rel-batch-size 5000 \
         --partitions 8 \
         --jar $HOME/jars/neo4j-connector-apache-spark_2.12-5.3.10_for_spark_3.jar \
         --node-mode merge \
@@ -79,15 +80,17 @@ def parse_args() -> argparse.Namespace:
                         "Node rows can be wide (up to 33 columns); larger "
                         "batches risk per-transaction memory pressure on the "
                         "receiver and do not improve throughput meaningfully.")
-    p.add_argument("--rel-batch-size", type=int, default=50000,
+    p.add_argument("--rel-batch-size", type=int, default=5000,
                    help="Connector batch.size for RELATIONSHIP writes. "
-                        "Default 50000. With unique constraints pre-created "
-                        "and `relationship.save.strategy=keys` in effect, each "
-                        "rel write is memory-light, and the bottleneck on the "
-                        "single-thread rel writer is sync round-trip count "
-                        "over Bolt. Larger batches reduce the round-trip "
-                        "count directly. Reasonable upper bound on a "
-                        "memory-rich receiver (128GB Aura): 100000.")
+                        "Default 5000. We tested 50000 vs 5000 empirically "
+                        "on a 32 GB BC Aura with the rest of the config "
+                        "fixed; throughput was effectively unchanged "
+                        "(~10K rows/sec either way). Per-transaction work "
+                        "scales linearly with batch size, so bigger "
+                        "batches just take proportionally longer. Surface "
+                        "this flag for workloads that may behave "
+                        "differently (very wide rel properties, vector "
+                        "rel attributes, etc.).")
     p.add_argument("--partitions", type=int, default=8,
                    help="Spark partitions for NODE writes. Default 8.")
     p.add_argument("--rel-partitions", type=int, default=1,
