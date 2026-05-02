@@ -4,6 +4,7 @@ data/
 parquet/
 results/*
 !results/full_run_*.csv
+!results/load_*.csv
 *.log
 
 # Aura credentials (any text file containing NEO4J_PASSWORD)

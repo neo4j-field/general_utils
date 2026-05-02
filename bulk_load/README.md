@@ -152,13 +152,18 @@ SCALE=0.01 ./bulk_load/scripts/run_load_benchmark.sh ~/Neo4j-*.txt
 
 ## Fresh-instance benchmarking (optional)
 
-For repeatable benchmark numbers, a brand-new Aura instance is a cleaner
-substrate than a reset of an existing one. A fresh instance has no warm
-page cache, no leftover schema fragments, and no WAL replay history;
-those are the kinds of carryover effects that make two runs of the
-"same" benchmark land on different rows-per-second numbers. For
-day-to-day operations, `reset_to_blank_neo4j_db.sh` from the parent
-`general_utils/` directory is fine. For benchmark validation, recreate.
+The lifecycle script automates a delete-and-recreate of the Aura instance
+via the public API, useful when you want absolute confidence the target is
+empty (e.g. when `reset_to_blank_neo4j_db.sh` itself is being changed and
+you do not want to trust it as the wipe path), or when a tier change is
+desired between runs.
+
+It is **not** a path to faster benchmark numbers. We tested fresh-vs-warm
+empirically and the difference was within run-to-run noise (see
+[Findings](#findings-hypotheses-tested-empirically) below). For everyday
+operations and benchmarking on the same tier, `reset_to_blank_neo4j_db.sh`
+from the parent `general_utils/` directory is fine and an order of
+magnitude faster than a delete-and-recreate.
 
 `run_load_benchmark.sh` accepts an opt-in `RECREATE_INSTANCE=true` flag
 that runs `src/recreate_instance.py` before phase 1. The lifecycle steps
@@ -311,6 +316,99 @@ Earlier 1% smoke test (~931 K rows): 76 s wall, 13,090 rows/sec. Used
 to validate the pipeline before committing 94 minutes of Aura time.
 Smoke-test extrapolation underestimated the full-run rate by ~25%
 because per-table fixed overhead amortizes better at scale.
+
+## Findings: hypotheses tested empirically
+
+After the baseline above, two hypotheses about the rel-phase bottleneck
+were tested. **Both were rejected.** Recording the data here so future
+operators can stop at the right experiment instead of re-running these.
+
+All three runs use identical configuration except where noted:
+n2-standard-8 in us-east1, against 32 GB business-critical Aura in
+us-east1, `NODE_MODE=create`, `NODE_BATCH_SIZE=5000`, `REL_PARTITIONS=1`,
+`SCALE=1.0`, 93,132,925 total rows.
+
+### Three-run comparison
+
+| Run | Date / time (UTC) | Wall time | Loader-only | Effective rate | Δ vs baseline (loader) |
+|---|---|---:|---:|---:|---:|
+| **Baseline** (warm BC, 5K rel batch) | 2026-04-30 01:51:55 → 03:26:20 | 5665 s | 5609 s | 16,604 rows/s | — |
+| **Hyp 1: 50K rel batch** (wipe + load) | 2026-05-01 19:56:04 → 21:54:22 | 7098 s (incl 895 s wipe) | 6139 s | 15,172 rows/s | **−9.4 %** |
+| **Hyp 2: fresh BC instance** (custom endpoint, no wipe) | 2026-05-02 10:10:11 → 11:46:46 | 5795 s | 5788 s | 16,090 rows/s | −3.2 % (within noise) |
+
+Per-table CSVs are committed under `results/`:
+[`full_run_b5000_p8_create.csv`](results/full_run_b5000_p8_create.csv),
+[`load_20260501T195604Z_n5000r50000_p8_create.csv`](results/load_20260501T195604Z_n5000r50000_p8_create.csv),
+[`load_20260502T101011Z_n5000r5000_p8_create.csv`](results/load_20260502T101011Z_n5000r5000_p8_create.csv).
+
+### Hypothesis 1 (rejected): bigger rel batches compress the rel phase
+
+**Theory.** With unique constraints pre-created and `relationship.save.strategy=keys`
+in effect, each rel write is a thin `MATCH(src{k}) MATCH(tgt{k}) CREATE` with very
+small per-row memory. The single-thread rel writer is bottlenecked on sync round-trip
+count over Bolt; sending 10x more rows per round-trip should compress the rel phase
+by close to 10x.
+
+**Test.** Same pipeline, same data, only `--rel-batch-size 50000` instead of 5000.
+
+**Result.** Rel phase: 5675 s at 50 K vs 5202 s at 5 K. **9 % slower, not faster.**
+Per-rel rates moved a bit but stayed in the same band:
+
+| rel | baseline 5 K | 50 K batch | fresh 5 K |
+|---|---:|---:|---:|
+| HAS_TRANSACTION (5 M rows) | 11,216 r/s | 9,524 r/s | 10,825 r/s |
+| HAS_ACCOUNT (3 M) | 11,509 r/s | 9,370 r/s | 11,131 r/s |
+| HAS_ADDRESS (3 M) | 10,996 r/s | 10,033 r/s | 10,582 r/s |
+| VIA_CHANNEL_TXN (3 M) | 12,527 r/s | 12,219 r/s | 12,617 r/s |
+| IN_CURRENCY_TXN (3 M) | 12,278 r/s | 12,185 r/s | 12,868 r/s |
+| FOR_CUSTOMER_SES (3 M) | 9,768 r/s | 8,888 r/s | 10,147 r/s |
+
+**Why the theory was wrong.** Per-transaction work on the receiver (the `MATCH src`
++ `MATCH tgt` + `CREATE rel` per row, plus index updates and lock acquisition)
+scales linearly with batch size. A 10x bigger batch reduces round-trip count by
+10x, but each transaction also takes 10x longer. Net throughput is unchanged in
+the best case and slightly worse here, likely because larger transactions have
+slightly more overhead in commit/flush.
+
+### Hypothesis 2 (rejected): a fresh instance outperforms a wiped-and-reused one
+
+**Theory.** A brand-new Aura instance has no warm page cache, no stale schema
+fragments, no fragmentation history. Loading into a fresh instance should give a
+cleaner baseline and possibly faster numbers than reusing a wiped instance.
+
+**Test.** Created a new 32 GB business-critical Aura in us-east1, pointed an
+existing custom endpoint (`custom-ep-pro-32-3rhw-9gff.endpoints.neo4j.io`) at
+it, and ran the same pipeline against the new instance with `WIPE_BEFORE_LOAD=false`
+(the new instance was already empty by construction). Custom-endpoint routing
+verified resolving to `ingress.production-orch-1174.neo4j.io` and `cypher-shell`
+returning `0` for `apoc.meta.stats()` before launch.
+
+**Result.** Loader wall: 5788 s vs 5609 s baseline. **3 % difference, within
+run-to-run noise.** Per-rel rates (column "fresh 5 K" above) sit on top of the
+warm baseline.
+
+**Why the theory was wrong.** A wiped instance is empty by definition once the
+reset script finishes (constraints dropped, all rels deleted, all nodes deleted,
+count store stats=0). Whatever residual heap state, page cache, or fragmentation
+history exists on the JVM does not materially affect throughput on the rel-write
+path, because the receiver's per-row CPU cost dominates everything else and that
+cost is the same on both substrates.
+
+### What this tells us about the actual bottleneck
+
+The rel phase ceiling on this workload is **per-row CPU work on the Aura
+receiver**, not transaction memory, not round-trip count, not page cache warmth,
+not fragmentation. Things that change those four variables do not change
+throughput meaningfully. Per-rel rates across all three runs cluster between
+~9,500 and ~13,000 rows/sec, regardless of batch size, instance freshness, or
+which one ran first.
+
+The single lever that was already flagged in the README's [Two non-obvious
+gotchas](#two-non-obvious-gotchas-smoke-test-surfaced-both) section, but not
+yet exercised, is **parallelism via `--rel-partitions`**. That is the next
+experiment to run, and it needs careful design because Forseti deadlocks on
+shared target nodes are a real risk at any rel-write parallelism > 1 with the
+default random FK distribution.
 
 ## Recommendations applicable to the customer's production load
 
