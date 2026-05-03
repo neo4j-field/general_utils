@@ -204,6 +204,95 @@ class AuraClient:
     def delete_instance(self, instance_id: str) -> None:
         self._request("DELETE", f"/v1/instances/{instance_id}")
 
+    # -------------------- v2beta1 (Bulk Import surface) --------------------
+    #
+    # The import API lives under the v2beta1 organizations/projects hierarchy.
+    # Project ID equals tenant ID for personal tenants. Discover both via
+    # list_organizations_v2() / list_projects_v2() if unknown.
+
+    def list_organizations_v2(self) -> list[dict[str, Any]]:
+        return self._request("GET", "/v2beta1/organizations").get("data", [])
+
+    def list_projects_v2(self, organization_id: str) -> list[dict[str, Any]]:
+        return self._request(
+            "GET", f"/v2beta1/organizations/{organization_id}/projects"
+        ).get("data", [])
+
+    def submit_import_job(self, *, organization_id: str, project_id: str,
+                          import_model_id: str, db_id: str,
+                          db_username: str | None = None,
+                          db_password: str | None = None) -> dict[str, Any]:
+        """POST /v2beta1/organizations/{org}/projects/{proj}/import/jobs.
+
+        Body shape (verified by probing the real endpoint):
+            {
+              "importModelId": "<uuid from console>",
+              "auraCredentials": {
+                "dbId": "<8-char instance id>",
+                "username": "neo4j",   # required for Free / VDC tiers only
+                "password": "..."      # required for Free / VDC tiers only
+              }
+            }
+
+        Returns the created job (id, status, etc.). Business Critical does
+        not require username/password — the API key authorization is enough.
+        """
+        aura_creds: dict[str, Any] = {"dbId": db_id}
+        if db_username is not None:
+            aura_creds["username"] = db_username
+        if db_password is not None:
+            aura_creds["password"] = db_password
+        body = {"importModelId": import_model_id, "auraCredentials": aura_creds}
+        path = f"/v2beta1/organizations/{organization_id}/projects/{project_id}/import/jobs"
+        return self._request("POST", path, body=body).get("data", {})
+
+    def get_import_job(self, *, organization_id: str, project_id: str,
+                       job_id: str) -> dict[str, Any]:
+        path = f"/v2beta1/organizations/{organization_id}/projects/{project_id}/import/jobs/{job_id}"
+        return self._request("GET", path).get("data", {})
+
+    def wait_for_import_job(self, *, organization_id: str, project_id: str,
+                            job_id: str,
+                            poll_seconds: float = 10.0,
+                            max_seconds: float = 3600.0,
+                            on_status=lambda j: None) -> dict[str, Any]:
+        """Poll the job status until it reaches a terminal state.
+
+        Aura's exact terminal status strings are not formally documented in
+        the public spec, so we match defensively on common terms. Anything
+        starting with 'complet'/'success'/'done' (case-insensitive) is
+        treated as terminal-ok. Anything starting with 'fail'/'error'/'cancel'
+        is terminal-error. Everything else (Pending, Running, Loading,
+        Indexing, etc.) means keep polling. The full status payload is
+        passed to on_status on every change so the caller sees raw values.
+        """
+        deadline = time.time() + max_seconds
+        last_status: str | None = None
+        TERMINAL_OK = ("complet", "succe", "done", "finish")
+        TERMINAL_ERR = ("fail", "error", "cancel", "abort")
+        while True:
+            job = self.get_import_job(
+                organization_id=organization_id, project_id=project_id, job_id=job_id,
+            )
+            status = str(job.get("status", "unknown"))
+            if status != last_status:
+                on_status(job)
+                last_status = status
+            lower = status.lower()
+            if any(lower.startswith(t) for t in TERMINAL_OK):
+                return job
+            if any(lower.startswith(t) for t in TERMINAL_ERR):
+                raise RuntimeError(
+                    f"Import job {job_id} reached terminal error status: {status}. "
+                    f"Full payload: {json.dumps(job, default=str)[:500]}"
+                )
+            if time.time() >= deadline:
+                raise TimeoutError(
+                    f"Import job {job_id} did not reach terminal state within "
+                    f"{max_seconds:.0f}s (last status: {status})"
+                )
+            time.sleep(poll_seconds)
+
     def wait_until_running(self, instance_id: str, *,
                            poll_seconds: float = 10.0,
                            max_seconds: float = 900.0,

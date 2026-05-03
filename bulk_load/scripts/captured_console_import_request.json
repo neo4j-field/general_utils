@@ -1,0 +1,122 @@
+{
+  "_NOTE": "Captured from console.neo4j.io browser network tab when user clicked 'Run import' for the Customer+Account+Address+HAS_ACCOUNT+HAS_ADDRESS model on instance e3290355. Used as the canonical reference for the body shape we need to construct programmatically for the full 22+33 schema. Model id 5QsYAgylFrz8qYcNWJUE is the partial model; we'll construct a full one with the same shape.",
+  "_ENDPOINT": "POST https://console.neo4j.io/api/import/v2/jobs",
+  "_AUTH": "Bearer token from login.neo4j.com (Auth0). Short-lived (15 min). Header: 'authorization: Bearer <token>'. Also requires header 'project-id: <project uuid>'.",
+  "_BODY_BELOW": "the verbatim request body, minus the bearer token",
+
+  "dataSourceId": "2ccc7bc1-0acd-42ea-9505-34fe1576074b",
+  "auraCredentials": {"dbId": "e3290355"},
+  "importConfig": {
+    "ignoreErrors": true,
+    "threads": 1,
+    "batchSize": 5000,
+    "importType": "initial"
+  },
+  "importModelMetadata": {
+    "version": "3.0.0",
+    "importModelId": "5QsYAgylFrz8qYcNWJUE",
+    "dataModel": {
+      "version": "3.0",
+      "configurations": {"idsToIgnore": []},
+      "graphSchemaRepresentation": {
+        "version": "1.0.0",
+        "graphSchema": {
+          "nodeLabels": [
+            {"$id": "nl:0", "token": "Account", "properties": [
+              {"$id": "p:0_0", "token": "accountId", "type": {"type": "integer"}, "nullable": false},
+              {"$id": "p:0_1", "token": "accountNumber", "type": {"type": "string"}, "nullable": false},
+              {"$id": "p:0_2", "token": "accountType", "type": {"type": "string"}, "nullable": false},
+              {"$id": "p:0_3", "token": "status", "type": {"type": "string"}, "nullable": false},
+              {"$id": "p:0_4", "token": "balance", "type": {"type": "float"}, "nullable": false},
+              {"$id": "p:0_5", "token": "availableBalance", "type": {"type": "float"}, "nullable": false},
+              {"$id": "p:0_6", "token": "openedAt", "type": {"type": "date"}, "nullable": false},
+              {"$id": "p:0_7", "token": "closedAt", "type": {"type": "date"}, "nullable": false},
+              {"$id": "p:0_8", "token": "interestRate", "type": {"type": "float"}, "nullable": false},
+              {"$id": "p:0_9", "token": "overdraftLimit", "type": {"type": "float"}, "nullable": false},
+              {"$id": "p:0_10", "token": "minimumBalance", "type": {"type": "float"}, "nullable": false},
+              {"$id": "p:0_11", "token": "taxStatus", "type": {"type": "string"}, "nullable": false},
+              {"$id": "p:0_12", "token": "dormancyDay", "type": {"type": "integer"}, "nullable": false},
+              {"$id": "p:0_13", "token": "sourceSystem", "type": {"type": "string"}, "nullable": false},
+              {"$id": "p:0_14", "token": "createdAt", "type": {"type": "localdatetime"}, "nullable": false},
+              {"$id": "p:0_15", "token": "updatedAt", "type": {"type": "localdatetime"}, "nullable": false},
+              {"$id": "p:0_16", "token": "insertDtm", "type": {"type": "localdatetime"}, "nullable": false}
+            ]},
+            {"$id": "nl:1", "token": "Address", "properties": [
+              {"$id": "p:1_0", "token": "addressId", "type": {"type": "integer"}, "nullable": false},
+              {"$id": "p:1_1", "token": "line1", "type": {"type": "string"}, "nullable": false},
+              {"$id": "p:1_2", "token": "line2", "type": {"type": "string"}, "nullable": false},
+              {"$id": "p:1_3", "token": "city", "type": {"type": "string"}, "nullable": false},
+              {"$id": "p:1_4", "token": "state", "type": {"type": "string"}, "nullable": false},
+              {"$id": "p:1_5", "token": "postalCode", "type": {"type": "integer"}, "nullable": false},
+              {"$id": "p:1_6", "token": "addressType", "type": {"type": "string"}, "nullable": false},
+              {"$id": "p:1_7", "token": "isPrimary", "type": {"type": "boolean"}, "nullable": false},
+              {"$id": "p:1_8", "token": "verified", "type": {"type": "boolean"}, "nullable": false},
+              {"$id": "p:1_9", "token": "createdAt", "type": {"type": "localdatetime"}, "nullable": false},
+              {"$id": "p:1_10", "token": "insertDtm", "type": {"type": "localdatetime"}, "nullable": false}
+            ]},
+            {"$id": "nl:2", "token": "Customer", "properties": [
+              {"$id": "p:2_0", "token": "customerId", "type": {"type": "integer"}, "nullable": false}
+            ]}
+          ],
+          "relationshipTypes": [
+            {"$id": "rt:0", "token": "HAS_ACCOUNT", "properties": [
+              {"$id": "p:0_0", "token": "insert_dtm", "type": {"type": "localdatetime"}, "nullable": false}
+            ]},
+            {"$id": "rt:1", "token": "HAS_ADDRESS", "properties": [
+              {"$id": "p:1_0", "token": "is_primary", "type": {"type": "boolean"}, "nullable": false},
+              {"$id": "p:1_1", "token": "insert_dtm", "type": {"type": "localdatetime"}, "nullable": false}
+            ]}
+          ],
+          "nodeObjectTypes": [
+            {"$id": "n:0", "labels": [{"$ref": "#nl:0"}]},
+            {"$id": "n:1", "labels": [{"$ref": "#nl:1"}]},
+            {"$id": "n:2", "labels": [{"$ref": "#nl:2"}]}
+          ],
+          "relationshipObjectTypes": [
+            {"$id": "r:0", "type": {"$ref": "#rt:0"}, "from": {"$ref": "#n:2"}, "to": {"$ref": "#n:0"}},
+            {"$id": "r:1", "type": {"$ref": "#rt:1"}, "from": {"$ref": "#n:2"}, "to": {"$ref": "#n:1"}}
+          ],
+          "constraints": [
+            {"$id": "c:0", "name": "accountId_Account_key", "constraintType": "key", "entityType": "node",
+             "nodeLabel": {"$ref": "#nl:0"}, "relationshipType": null, "properties": [{"$ref": "#p:0_0"}]}
+          ],
+          "indexes": []
+        }
+      },
+      "graphSchemaExtensionsRepresentation": {
+        "nodeKeyProperties": [
+          {"node": {"$ref": "#n:0"}, "keyProperties": [{"$ref": "#p:0_0"}]}
+        ]
+      },
+      "graphMappingRepresentation": {
+        "dataSourceSchema": {
+          "type": "cloud",
+          "tableSchemas": [
+            {"name": "Account", "fields": [
+              {"name": "account_id", "rawType": "BIGINT", "recommendedType": {"type": "integer"},
+               "supportedTypes": [{"type": "integer"}, {"type": "string"}, {"type": "float"}]}
+            ], "primaryKeys": [], "foreignKeys": [], "expanded": true}
+          ]
+        },
+        "nodeMappings": [
+          {"node": {"$ref": "#n:0"}, "tableName": "Account", "propertyMappings": [
+            {"property": {"$ref": "#p:0_0"}, "fieldName": "account_id"}
+          ]}
+        ],
+        "relationshipMappings": [
+          {"relationship": {"$ref": "#r:0"}, "tableName": "HAS_ACCOUNT",
+           "fromMappings": {"#p:2_0": "src_customer_id"},
+           "toMappings": {"#p:0_0": "tgt_account_id"},
+           "propertyMappings": [
+             {"property": {"$ref": "#p:0_0"}, "fieldName": "insert_dtm"}
+           ]}
+        ]
+      }
+    }
+  },
+  "visualisation": {
+    "nodes": [
+      {"id": "n:0", "position": {"x": 0, "y": 0}}
+    ]
+  }
+}
