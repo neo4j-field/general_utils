@@ -437,17 +437,46 @@ items landed. **5.3x faster than the 5,609 s Bolt baseline.**
 | Bolt Spark Connector (5K rel batch) | 94 min (5,609 s) | 16,604 rows/s | — |
 | **Aura Bulk Import (this run)** | **17 min 38 s (1,058 s)** | **88,028 rows/s** | **5.3x faster** |
 
-Phase breakdown captured in the screenshots:
+Phase breakdown captured in the result screenshot:
 
 - Creating database: 3 min 59 s (scales linearly with row count: was 1 min 35 s for 16 M rows)
 - Uploading: ~1-2 min (mostly fixed cost)
 - Bringing database online: ~2-3 min (fixed cost)
 
-![Bulk Import — partial run, 16M items, 5 minutes](screenshots/bulk-import-partial-16M-rows.png)
-*Partial run with 5 entities (3 nodes + 2 rels = 16 M items): 5 min total. Phase breakdown: 1 m 35 s creating DB + 1 m 02 s uploading + 2 m 09 s bringing online.*
+#### The full workflow, end to end
 
-![Bulk Import — full 22+33 schema, 93M rows, 17m 38s, COMPLETED](screenshots/bulk-import-full-93M-rows.png)
-*Full 22-node + 33-rel schema, 93,132,925 rows, **17 min 38 s wall time, COMPLETED**. Same instance and tier as the Bolt baseline (32 GB BC us-east1).*
+**Step 1: model authoring in the Aura console (`console-preview.neo4j.io` → Import).**
+The data source `Bulk_Import_Large_Volume` (the GCS-staged parquet bucket
+registered with HMAC credentials) is on the left. The graph canvas in the
+center shows all 22 node types + 33 relationship types laid out and connected.
+The right panel is the per-node property mapping; visible here are the
+Customer node's properties mapping each graph token (e.g. `customerId`) to
+its parquet column (`customer_id`).
+
+![Aura Import model authoring view: 22 nodes + 33 relationships with cloud data source `Bulk_Import_Large_Volume`](screenshots/Graph_Model.png)
+
+**Step 2: select the import method.**
+"Run import" surfaces both options. **Bulk Import** is explicitly labeled
+*"This option will stop your database and override existing data"* — the
+destructive semantic that the spec also documents. Picking this and clicking
+"Run" is the entire trigger today.
+
+![Run import dialog: Bulk import (Preview) selected, with the explicit override warning](screenshots/Select_Import_Method.png)
+
+**Step 3: result.**
+Job `4d4c4c76-2586-40c5-92bc-3e7a7efa5a93` against instance `e3290355`,
+**17 min 38 s wall time, status COMPLETED**. The Creating database phase
+took 3 min 59 s for the full 93 M-row schema; the rest is upload and
+bring-online.
+
+![Bulk Import job result: 17m 38s wall, COMPLETED, with phase breakdown](screenshots/Bulk_Import_Result.png)
+
+**Supporting evidence — partial run for the linear-scaling argument:**
+
+![Earlier partial run with 5 entities (16M items): 5 min wall, with phases sized accordingly](screenshots/bulk-import-partial-16M-rows.png)
+*A 5-entity partial run (Customer + Account + Address + 2 rels = 16 M items)
+finished in 5 min total. Creating database was 1 min 35 s for that subset,
+which extrapolates linearly to the 3 min 59 s observed at the full 93 M scale.*
 
 **Customer extrapolation.** At their 213 M-row workload on 128 GB Aura, Bulk
 Import is projected to land in **30-40 min**, vs the 6+ hours the Bolt path
